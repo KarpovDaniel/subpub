@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -28,19 +28,21 @@ func startTestServer(t *testing.T) (pb.PubSubClient, func()) {
 	pb.RegisterPubSubServer(grpcServer, svc)
 	go grpcServer.Serve(lis)
 
-	// Dial с коротким таймаутом
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	conn, err := grpc.DialContext(ctx, lis.Addr().String(),
-		grpc.WithInsecure(),
-		grpc.WithBlock(),
+	_, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	conn, err := grpc.NewClient(
+		lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
-		t.Fatalf("dial failed: %v", err)
+		cancel()
+		t.Fatalf("NewClient failed: %v", err)
 	}
+	conn.Connect()
+	cancel()
+
 	return pb.NewPubSubClient(conn), func() {
-		grpcServer.GracefulStop()
 		conn.Close()
+		grpcServer.GracefulStop()
 	}
 }
 
@@ -48,36 +50,31 @@ func TestPublishAndSubscribe(t *testing.T) {
 	client, shutdown := startTestServer(t)
 	defer shutdown()
 
-	// 1) Открываем стрим подписки
 	stream, err := client.Subscribe(context.Background(), &pb.SubscribeRequest{Key: "topic"})
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
 
-	// 2) Запускаем горутину-приёмник ДО публикации
 	msgCh := make(chan *pb.Event, 1)
 	errCh := make(chan error, 1)
-	doneCh := make(chan struct{}, 1) // Канал для завершения теста
+	doneCh := make(chan struct{}, 1)
+
 	go func() {
 		msg, err := stream.Recv()
 		if err != nil {
 			errCh <- err
 		} else {
-			log.Printf("[TestPublishAndSubscribe] Received message: %s", msg.Data) // Добавлено логирование
 			msgCh <- msg
 		}
-		close(doneCh) // Закрываем канал, когда горутина завершена
+		close(doneCh)
 	}()
 
-	// 3) Даем чуть времени на установку Recv()
 	time.Sleep(10 * time.Millisecond)
 
-	// 4) Публикуем
 	if _, err := client.Publish(context.Background(), &pb.PublishRequest{Key: "topic", Data: "hello"}); err != nil {
 		t.Fatalf("Publish failed: %v", err)
 	}
 
-	// 5) Ждём ответа не дольше 500ms
 	select {
 	case msg := <-msgCh:
 		if msg.Data != "hello" {
@@ -85,11 +82,10 @@ func TestPublishAndSubscribe(t *testing.T) {
 		}
 	case err := <-errCh:
 		t.Fatalf("Recv error: %v", err)
-	case <-time.After(500 * time.Millisecond): // Увеличиваем тайм-аут
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timeout waiting for message")
 	}
 
-	// 6) Ожидаем завершения горутины
 	<-doneCh
 }
 
@@ -97,7 +93,6 @@ func TestMultipleSubscribers(t *testing.T) {
 	client, shutdown := startTestServer(t)
 	defer shutdown()
 
-	// 1) Открываем два стрима
 	s1, err := client.Subscribe(context.Background(), &pb.SubscribeRequest{Key: "k"})
 	if err != nil {
 		t.Fatalf("Subscribe1 failed: %v", err)
@@ -107,14 +102,13 @@ func TestMultipleSubscribers(t *testing.T) {
 		t.Fatalf("Subscribe2 failed: %v", err)
 	}
 
-	// 2) Запускаем приём до публикации
 	type recvResult struct {
 		data string
 		err  error
 	}
 	ch1 := make(chan recvResult, 1)
 	ch2 := make(chan recvResult, 1)
-	doneCh := make(chan struct{}, 2) // Канал для завершения обеих горутин
+	doneCh := make(chan struct{}, 2)
 
 	go func() {
 		msg, err := s1.Recv()
@@ -123,7 +117,7 @@ func TestMultipleSubscribers(t *testing.T) {
 		} else {
 			ch1 <- recvResult{msg.Data, nil}
 		}
-		close(doneCh) // Закрываем канал после завершения горутины
+		doneCh <- struct{}{}
 	}()
 	go func() {
 		msg, err := s2.Recv()
@@ -132,18 +126,15 @@ func TestMultipleSubscribers(t *testing.T) {
 		} else {
 			ch2 <- recvResult{msg.Data, nil}
 		}
-		close(doneCh) // Закрываем канал после завершения горутины
+		doneCh <- struct{}{}
 	}()
 
-	// 3) Даем время на Recv()
 	time.Sleep(10 * time.Millisecond)
 
-	// 4) Публикуем
 	if _, err := client.Publish(context.Background(), &pb.PublishRequest{Key: "k", Data: "msg"}); err != nil {
 		t.Fatalf("Publish failed: %v", err)
 	}
 
-	// 5) Ждём каждого ответа
 	timeout := time.After(500 * time.Millisecond)
 	for i, ch := range []chan recvResult{ch1, ch2} {
 		select {
@@ -159,7 +150,6 @@ func TestMultipleSubscribers(t *testing.T) {
 		}
 	}
 
-	// 6) Ожидаем завершения обеих горутин
 	<-doneCh
 	<-doneCh
 }
@@ -168,11 +158,19 @@ func TestSubscribeEmptyKey(t *testing.T) {
 	client, shutdown := startTestServer(t)
 	defer shutdown()
 
-	_, err := client.Subscribe(context.Background(), &pb.SubscribeRequest{Key: ""})
-	if err == nil {
-		t.Fatal("expected error for empty key")
+	stream, err := client.Subscribe(context.Background(), &pb.SubscribeRequest{Key: ""})
+	if err != nil {
+		t.Fatalf("Subscribe failed unexpectedly: %v", err)
 	}
-	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+	_, err = stream.Recv()
+	if err == nil {
+		t.Fatal("expected error for empty key on Recv()")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got: %v", err)
+	}
+	if st.Code() != codes.InvalidArgument {
 		t.Errorf("got code %v, want InvalidArgument", st.Code())
 	}
 }
@@ -206,15 +204,12 @@ func TestSubscribeCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
-	// сразу отменяем
 	cancel()
 
-	// Recv должен быстро завершиться
 	msg, err := stream.Recv()
 	if msg != nil {
 		t.Errorf("expected no msg, got %v", msg)
 	}
-	// EOF или Canceled
 	if err != io.EOF && status.Code(err) != codes.Canceled {
 		t.Errorf("got error %v, want EOF or Canceled", err)
 	}

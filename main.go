@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/joho/godotenv"
 	"log"
 	"net"
 	"os"
 	"os/signal"
-	"time"
-
+	"subpub/internal/config"
 	"subpub/internal/server"
 	"subpub/internal/subpub"
 	pb "subpub/proto"
@@ -18,29 +16,16 @@ import (
 )
 
 func main() {
-	// загрузка .env (если есть)
-	_ = godotenv.Load()
-
-	// читаем из окружения
-	port := os.Getenv("GRPC_PORT")
-	if port == "" {
-		port = "50051"
-	}
-	timeoutStr := os.Getenv("SHUTDOWN_TIMEOUT")
-	if timeoutStr == "" {
-		timeoutStr = "5s"
-	}
-	shutdownTimeout, err := time.ParseDuration(timeoutStr)
+	cfg, err := config.Load(".env")
 	if err != nil {
-		log.Fatalf("invalid SHUTDOWN_TIMEOUT: %v", err)
+		log.Fatalf("failed to load config: %v", err)
 	}
 
-	addr := fmt.Sprintf(":%s", port)
-	lis, err := net.Listen("tcp", addr)
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.GRPCPort))
 	if err != nil {
-		log.Fatalf("listen %s failed: %v", addr, err)
+		log.Fatalf("failed to listen: %v", err)
 	}
-	log.Printf("gRPC server listening on %s", addr)
+	log.Printf("gRPC server listening on :%d", cfg.GRPCPort)
 
 	// создаём шину событий
 	bus := subpub.NewSubPub()
@@ -66,9 +51,9 @@ func main() {
 	grpcServer.GracefulStop()
 
 	// ждём закрытия шины
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-	if err := bus.Close(ctx); err != nil {
+	if err = bus.Close(ctx); err != nil {
 		log.Printf("bus.Close timeout: %v", err)
 	}
 	log.Println("server stopped")
