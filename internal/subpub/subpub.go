@@ -10,19 +10,16 @@ var ErrClosed = errors.New("subpub: already closed")
 
 type MessageHandler func(msg interface{})
 
-// Subscription позволяет отписаться.
 type Subscription interface {
 	Unsubscribe()
 }
 
-// SubPub — интерфейс нашей шины.
 type SubPub interface {
 	Subscribe(subject string, cb MessageHandler) (Subscription, error)
 	Publish(subject string, msg interface{}) error
 	Close(ctx context.Context) error
 }
 
-// NewSubPub создаёт новый экземпляр.
 func NewSubPub() SubPub {
 	return &subpub{
 		subs: make(map[string]map[*subscription]struct{}),
@@ -84,7 +81,6 @@ func (sp *subpub) Publish(subject string, msg interface{}) error {
 		return ErrClosed
 	}
 	subs := sp.subs[subject]
-	// разрежем внешний мьютекс
 	var list []*subscription
 	for ss := range subs {
 		list = append(list, ss)
@@ -104,7 +100,6 @@ func (sp *subpub) Close(ctx context.Context) error {
 		return nil
 	}
 	sp.closed = true
-	// снимем всех подписчиков
 	for _, subs := range sp.subs {
 		for ss := range subs {
 			ss.unsubscribeInternal()
@@ -152,7 +147,6 @@ func (ss *subscription) dispatch() {
 		ss.queue = ss.queue[1:]
 		ss.qmu.Unlock()
 
-		// блокируемся только на передачу одному подписчику
 		ss.msgCh <- msg
 	}
 	close(ss.msgCh)
@@ -168,14 +162,13 @@ func (ss *subscription) unsubscribeInternal() {
 	ss.once.Do(func() {
 		ss.qmu.Lock()
 		ss.closed = true
-		ss.queue = nil // сбросить очередь
+		ss.queue = nil
 		ss.qmu.Unlock()
 		ss.qcond.Broadcast()
 	})
 }
 
 func (ss *subscription) Unsubscribe() {
-	// сначала удалить из родительской карты
 	sp := ss.parent
 	sp.mu.Lock()
 	if subs, ok := sp.subs[ss.subject]; ok {

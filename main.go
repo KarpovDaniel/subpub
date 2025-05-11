@@ -27,12 +27,9 @@ func main() {
 	}
 	log.Printf("gRPC server listening on :%d", cfg.GRPCPort)
 
-	// создаём шину событий
 	bus := subpub.NewSubPub()
-	// создаём сервис
 	svc := server.NewService(bus)
 
-	// запускаем gRPC
 	grpcServer := grpc.NewServer()
 	pb.RegisterPubSubServer(grpcServer, svc)
 
@@ -42,7 +39,6 @@ func main() {
 		}
 	}()
 
-	// graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	<-sigCh
@@ -50,7 +46,6 @@ func main() {
 
 	grpcServer.GracefulStop()
 
-	// ждём закрытия шины
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err = bus.Close(ctx); err != nil {

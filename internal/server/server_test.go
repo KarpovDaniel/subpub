@@ -16,7 +16,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// startTestServer стартует gRPC-сервер и возвращает клиента + shutdown.
 func startTestServer(t *testing.T) (pb.PubSubClient, func()) {
 	lis, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -179,12 +178,12 @@ func TestPublishInvalidInput(t *testing.T) {
 	client, shutdown := startTestServer(t)
 	defer shutdown()
 
-	cases := []pb.PublishRequest{
+	cases := []*pb.PublishRequest{
 		{Key: "", Data: "d"},
 		{Key: "k", Data: ""},
 	}
 	for _, req := range cases {
-		_, err := client.Publish(context.Background(), &req)
+		_, err := client.Publish(context.Background(), req)
 		if err == nil {
 			t.Errorf("expected error for %+v", req)
 			continue
